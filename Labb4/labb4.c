@@ -1,90 +1,128 @@
-#include "esp_task_wdt.h"
-#include "driver/dac.h"
-#include "driver/adc.h"
-#include "driver/gpio.h"
-#include "soc/dac_channel.h"
-#include "esp32/rom/ets_sys.h"
-#include "esp_timer.h"
+#include <stdio.h>
+#include <esp_task_wdt.h>
+#include <driver/dac.h>
+#include <soc/soc.h>
+#include <soc/sens_reg.h>
+#include <soc/syscon_reg.h>
+#include <driver/adc.h>
+#include <esp_timer.h>
+#include <driver/timer.h>
 
-//The sampling freq to be used
-int freq = 10000;
-//filtrets längd
+//Length of the filter
 #define M 4
+#define N 4
 
-#define N 9
+//The sampling freq to be used 
+int freq = 10000;
 
-//initialisera arrays
-static float xbuff[M+1] = {0};
-//koefficienterna
-//static const float b[M+1] = {0.2500,0.2500,0.2500,0.2500};
-static const float b[M+1] = {0.1, 0.1, 0.1, 0.1, 0.1};
+static float xbuff[M+1]={0};
+static float b[M+1] = {
+                            0.01488697472657, 
+                            -0.02695899404537,  
+                            0.03705935223574, 
+                            -0.02695899404537,
+                            0.01488697472657    };
+static float ybuff[N+1]={0};
+static float a[N+1]={
+                            -1,   
+                            3.338693232847,    
+                            -4.401916486793,   
+                            2.691625646031,
+                            -0.6428936122854    };
+
+
 //Callback for how often you sample.
-
-static float ybuff[N+1] = {0};
-static const float a[N+1] = {0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9};
-
-
 static void periodic_timer_callback(void *arg)
 {
-    gpio_set_level(GPIO_NUM_14, 1);
+    gpio_set_level(GPIO_NUM_27,1);
 
-    float val = adc1_get_raw(ADC1_CHANNEL_4);
+    float val = adc1_get_raw(ADC1_CHANNEL_6);
     val = val / 16;
-   
-    //Uppdatera xbuff
-    for (int i = M; i > 0; i--) {
-        xbuff[i] = xbuff[i-1];
-    }
-    xbuff[0] = val;
-    //beräkna filtervärdet
-    float filtered_val = 0.0;
-    for (int i = 0; i <= M; i++) {
-        filtered_val += xbuff[i] * b[i];
-    }
+
+    
+
+    ///////// lab 2 ///////// 
+    //static uint16_t buffer[10000]={0};
+    //static uint32_t k=0;
+    //buffer[k]=val;
+    //k++;
+    //if (k==10000) k=0;
+    //float outvalue = buffer[k]+val;
+    //////////////////////////// 
+
+    /////////////-FIR-/////////////// 
+    static uint32_t k=0;
+    float outvalue; 
+    float sum = 0;
 
 
-  float filtered_sum = 0;
-    for (int j = 0; j <= N; j++) {
-        filtered_sum += a[j+1] * ybuff[j+1];
+    // make room for new input value
+    for (k = M; k > 0; k--) {
+        xbuff[k] = xbuff[k-1];
     }
-    filtered_sum += val;
+    xbuff[0] = (float)val;
+
+    // form sum
+    for (k = 0; k <= M; k++) {
+        sum += xbuff[k] * b[k];
+    }
+
+    // convert and store in outvalue
+    // outvalue = (float)sum;
+    //////////////////////////// 
+
+
+    /////////////-IIR-/////////////// 
+    //static float a[N+1]={0.9};
+
+    // form filtered output
+    float filtered_sum = 0;
+    for (k = 0; k <= N; k++) {
+        filtered_sum += a[k+1] * ybuff[k+1];
+    }
+    filtered_sum += sum;
 
     // make room for new output value
-    for (int j = N; j > 0; j--) {
-        ybuff[j] = ybuff[j-1];
+    for (k = N; k > 0; k--) {
+        ybuff[k] = ybuff[k-1];
     }
 
     // store new output value
     ybuff[1] = filtered_sum;
 
-    val = (uint32_t)ybuff[1];
-   
-    dac_output_voltage(DAC_CHANNEL_1, (int)filtered_val);
-    gpio_set_level(GPIO_NUM_14, 0);
+    outvalue = (uint32_t)ybuff[1];
+    ///////////////////////////
+
+
+    //original, but with val instead of outvalue.
+    dac_output_voltage(DAC_CHANNEL_1, (int)outvalue);
+
+    gpio_set_level(GPIO_NUM_27,0);
+
 }
 
 void app_main()
 {
-    //init adc and dac
+
     adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC1_CHANNEL_4, ADC_ATTEN_DB_11);
-    gpio_pullup_en(GPIO_NUM_32);
+    adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11);
+    gpio_pullup_en(32);
     dac_output_enable(DAC_CHANNEL_1);
 
-    gpio_config_t config;
-    config.pin_bit_mask = 1 << GPIO_NUM_14;
-    config.mode = GPIO_MODE_DEF_OUTPUT;
-    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    config.pull_up_en = GPIO_PULLUP_ENABLE;
-    ESP_ERROR_CHECK(gpio_config(&config));
+    gpio_config_t io_conf;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1 << GPIO_NUM_27);
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    gpio_config(&io_conf);
 
     const esp_timer_create_args_t periodic_timer_args = {
         .callback = &periodic_timer_callback,
-        //name is optional, but may help identify the timer when debugging
+        //name is optional, but may help identify the timer when debugging 
         .name = "periodic"};
 
     esp_timer_handle_t periodic_timer;
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000000/freq));
-
-   }
+}
